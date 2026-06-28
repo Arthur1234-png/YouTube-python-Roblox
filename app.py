@@ -1,85 +1,94 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 from pytubefix import YouTube
-from moviepy import VideoFileClip
-from PIL import Image
+import cv2
 import os
 
 app = Flask(__name__)
 
-# CONFIGURAÇÕES
-video_path = "video.mp4"
-frame_width, frame_height = 64, 64
-fps = 10
-frame_index = 0
-clip = None
-total_frames = 0
-titulo_atual = "Nenhum vídeo carregado"
+# =====================================================================
+# 🔴 LINK DA LIVE DO YOUTUBE (Troque aqui pelo link da transmissão ao vivo)
+# =====================================================================
+LIVE_URL = "https://www.youtube.com/watch?v=live_id_aqui" 
+# =====================================================================
 
-# 1. ROTA PARA BAIXAR E CARREGAR O VÍDEO DINAMICAMENTE
-@app.route('/carregar-video', methods=['POST'])
-def carregar_video():
-    global clip, total_frames, frame_index, titulo_atual
-    dados = request.json or {}
-    url = dados.get("url")
+FRAME_WIDTH, FRAME_HEIGHT = 64, 64
+video_captura = None
+titulo_atual = "Nenhuma Live ativa"
+
+def conectar_live():
+    global video_captura, titulo_atual
+    print(f"📡 Conectando à transmissão ao vivo: {LIVE_URL}")
     
-    if not url:
-        return jsonify({"status": "erro", "mensagem": "A URL fornecida está vazia"}), 400
-        
     try:
-        print(f"Baixando a URL do YouTube: {url}")
-        yt = YouTube(url)
+        yt = YouTube(LIVE_URL)
         titulo_atual = yt.title
+        print(f"📺 Título da Live: {titulo_atual}")
         
-        # Fecha o clip anterior para liberar o arquivo se ele existir
-        if clip:
-            clip.close()
-            
-        if os.path.exists(video_path):
-            os.remove(video_path)
-            
-        # Baixa em 360p para não estourar a RAM do plano gratuito da Render
-        stream = yt.streams.filter(progressive=True, file_extension='mp4', res="360p").first()
-        if not stream:
-            stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').asc().first()
-            
-        stream.download(filename=video_path)
-        print("✅ Vídeo baixado com sucesso!")
+        # Obtém a URL direta do fluxo de transmissão (HLS/m3u8) da live
+        stream_url = yt.streaming_data.get("hlsManifestUrl")
         
-        # Carrega o novo vídeo na memória via MoviePy
-        clip = VideoFileClip(video_path)
-        total_frames = int(clip.duration * fps)
-        frame_index = 0 # Reinicia o contador de frames
-        
-        return jsonify({"status": "sucesso", "mensagem": f"Tocando: {titulo_atual}"})
-        
-    except Exception as e:
-        print(f"Erro ao processar: {e}")
-        return jsonify({"status": "erro", "mensagem": str(e)}), 500
+        if not stream_url:
+            # Caso não ache o hlsManifestUrl, tenta buscar o formato padrão de maior compatibilidade
+            stream = yt.streams.filter(live_stream=True, file_extension='mp4').first()
+            if stream:
+                stream_url = stream.url
 
-# 2. SERVIR FRAMES EM LOOP (Formato de matriz tridimensional [y][x][RGB])
+        if stream_url:
+            if video_captura:
+                video_captura.release()
+            
+            # O OpenCV abre o link da transmissão ao vivo como se fosse uma câmera IP
+            video_captura = cv2.VideoCapture(stream_url)
+            print("✅ Conexão com o fluxo da Live estabelecida com sucesso!")
+        else:
+            print("❌ Não foi possível extrair o link de transmissão desta Live.")
+            
+    except Exception as e:
+        print(f"❌ Erro ao conectar na Live: {e}")
+
+# Inicia a conexão assim que o script roda
+conectar_live()
+
 @app.route("/proximo-frame")
 def get_frame():
-    global frame_index, clip, total_frames
+    global video_captura
+
+    if not video_captura or not video_captura.isOpened():
+        return jsonify({"erro": "Transmissão offline ou não conectada no Python."}), 500
+
+    # Captura o frame atual em tempo real da live
+    sucesso, frame = video_captura.read()
     
-    if not clip:
-        return jsonify({"erro": "Nenhum vídeo ativo. Cole um link primeiro."}), 400
+    # Se a live cair ou falhar o frame, tenta reconectar uma vez
+    if not sucesso:
+        print("⚠️ Fluxo interrompido. Tentando reconectar à Live...")
+        conectar_live()
+        sucesso, frame = video_captura.read()
+        if not sucesso:
+            return jsonify({"erro": "A transmissão ao vivo parece ter terminado."}), 500
 
-    # Calcula tempo do frame atual
-    t = (frame_index % total_frames) / fps
-    frame_index += 1
+    try:
+        # Redimensiona diretamente no OpenCV (muito mais rápido que converter para PIL)
+        frame_redimensionado = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
+        
+        # O OpenCV lê em BGR, convertemos para o padrão RGB do Roblox
+        frame_rgb = cv2.cvtColor(frame_redimensionado, cv2.COLOR_BGR2RGB)
 
-    # Extrai frame e redimensiona
-    frame = clip.get_frame(t)
-    img = Image.fromarray(frame).resize((frame_width, frame_height)).convert("RGB")
-
-    # Converte pixels pra estrutura JSON [y][x][RGB] idêntica à sua
-    pixels = [
-        [[int(r), int(g), int(b)] for r, g, b in [img.getpixel((x, y)) for x in range(frame_width)]]
-        for y in range(frame_height)
-    ]
-
-    return jsonify({"pixels": pixels})
+        # Monta a matriz estruturada [y][x][RGB]
+        pixels = []
+        for y in range(FRAME_HEIGHT):
+            linha = []
+            for x in range(FRAME_WIDTH):
+                r, g, b = frame_rgb[y, x]
+                linha.append([int(r), int(g), int(b)])
+            pixels.append(linha)
+        
+        return jsonify({"pixels": pixels, "status": "ao_vivo"})
+        
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+    
     
