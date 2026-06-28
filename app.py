@@ -8,7 +8,7 @@ app = Flask(__name__)
 # =====================================================================
 # 🔴 LINK DA LIVE DO YOUTUBE (Troque aqui pelo link da transmissão ao vivo)
 # =====================================================================
-LIVE_URL = "https://www.youtube.com/watch?v=live_id_aqui" 
+LIVE_URL = "https://www.youtube.com/watch?v=6L3aOGmPHic&pp=0gcJCUELAYcqIYzv" 
 # =====================================================================
 
 FRAME_WIDTH, FRAME_HEIGHT = 64, 64
